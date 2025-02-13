@@ -1,0 +1,66 @@
+name: Deploy to EKS
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_FRONTEND: portfolio-frontend
+  ECR_REPOSITORY_BACKEND: portfolio-backend
+  EKS_CLUSTER_NAME: portfolio-cluster
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build and push frontend image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      working-directory: ./frontend
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:${{ github.sha }} .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:${{ github.sha }}
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_FRONTEND:latest
+
+    - name: Build and push backend image
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      working-directory: ./backend
+      run: |
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:${{ github.sha }} .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:${{ github.sha }}
+        docker tag $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:${{ github.sha }} $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:latest
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY_BACKEND:latest
+
+    - name: Update kube config
+      run: aws eks update-kubeconfig --name ${{ env.EKS_CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+
+    - name: Deploy to EKS
+      run: |
+        # Update image tags in deployment files
+        sed -i "s|\${AWS_ACCOUNT_ID}|${{ steps.login-ecr.outputs.registry }}|g" k8s/*.yaml
+        sed -i "s|\${AWS_REGION}|${{ env.AWS_REGION }}|g" k8s/*.yaml
+        sed -i "s|\${SSL_CERT_ARN}|${{ secrets.SSL_CERT_ARN }}|g" k8s/*.yaml
+        
+        # Create namespace if it doesn't exist
+        kubectl create namespace portfolio --dry-run=client -o yaml | kubectl apply -f -
+        
+        # Apply k8s manifests
+        kubectl apply -f k8s/ 
